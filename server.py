@@ -1,13 +1,8 @@
 #  coding: utf-8 
-import os
-import socketserver
-import http.client
-import mimetypes
-from urllib.parse import urlparse, unquote
 
 # http.client prodives a dictionary of Status Codes and Reasons
 
-# Copyright 2013 Abram Hindle, Eddie Antonio Santos
+# Copyright 2013 Abram Hindle, Eddie Antonio Santos, Uladzimir Bondarau
 # 
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -32,139 +27,107 @@ from urllib.parse import urlparse, unquote
 
 # try: curl -v -X GET http://127.0.0.1:8080/
 
-BLANK_LINE = b"\r\n"
+import os
+import socketserver
+import http.client
+import mimetypes
+from urllib.parse import urlparse, unquote
+
+from wsgiref.handlers import format_date_time
+from datetime import datetime
+from time import mktime
+
+CARRIAGE_RETURN = b"\r\n"
 BASE_DIR = "www/"
+SERVER_NAME = "MyLittleServer"
 
 class MyWebServer(socketserver.BaseRequestHandler):
-    headers = {
-        'Server': 'MyLittleServer',
-        'Content-Type': 'text/html',
-    }
-
-    def response_status(self, status_code):
-        # Returns first line of response
-        reason = http.client.responses[status_code]
-        line = "HTTP/1.1 %s %s\r\n" % (status_code, reason)
-
-        return line.encode()
-
-    def response_headers(self, extra_headers=None):
-        headers_copy = self.headers.copy() 
-
-        if extra_headers:
-            headers_copy.update(extra_headers)
-
-        headers = ""
-
-        for header_type in headers_copy:
-            headers += "%s: %s\r\n" % (header_type, headers_copy[header_type])
-
-        return headers.encode()
-
     def handle(self):
+        # TODO read large requests
         self.data = self.request.recv(1024).strip()
-        print ("Got a request of: %s\n" % self.data)
+        # print ("Got a request of: %s\n" % self.data)
 
         request = HTTPRequest(self.data)
-        print("request is %s" % (request))
+        # print("request is %s" % (request))
 
         try:
             handler = getattr(self, 'handle_%s' % request.method)
         except AttributeError:
-            handler = self.handle_invalid_method()
+            handler = getattr(self, "handle_invalid_method")
 
+        print(handler)
         response = handler(request)
 
-        print(response)
         self.request.sendall(response)
 
     def handle_GET(self, request):
         filename = unquote(request.uri)
         file_path = self.check_file_location(filename)
-        print(file_path)
-        print("requestttttttt")
 
-        if file_path == "Forbidden":
-            return self.response_403()
+        my_response = HTTPResponse()
+        if file_path['status'] == "Forbidden":
+            # I wanted to serve 403 Forbidden when accessing out of directory
+            # but looks like assignment specifiec 404 in this case
+            # return my_response.response_403()
+            return my_response.response_404()
 
-        if file_path == "Not Found":
-            return self.response_404()
+        if file_path['status'] == "Not Found":
+            return my_response.response_404()
 
-        try:
-            file = open(file_path, 'rb')
-            response_body = file.read()
-            content_type = mimetypes.guess_type(file_path)[0] or 'text/html'
-            extra_headers = {'Content-Type': content_type}
+        if file_path['status'] == "Redirected":
+            extra_headers = {'Location': file_path['location']}
+            return my_response.response_301(extra_headers=extra_headers)
 
-            return self.response_200(response_body=response_body, extra_headers=extra_headers)
-        except Exception as e:
-            return self.response_403()
-        finally:
-            file.close()
+        if file_path['status'] == "OK":
+            try:
+                file = open(file_path['location'], 'rb')
+                response_body = file.read()
+                content_type = mimetypes.guess_type(file_path['location'])[0] or 'text/html'
+                extra_headers = {'Content-Type': content_type}
 
-    def handle_invalid_method(self):
-        self.response_405()
+                return my_response.response_200(response_body=response_body, extra_headers=extra_headers)
+            except Exception as e:
+                return my_response.response_403()
+            finally:
+                file.close()
+        else:
+            return my_response.response_500()
+
+    def handle_invalid_method(self, request=None):
+        my_response = HTTPResponse()
+        return my_response.response_405()
 
     def check_file_location(self, filename):
-        print(filename)
-        print("filename")
         base_dir = os.path.abspath("www/")
         file_path = os.path.abspath("www/" + filename)
 
-        print(file_path)
-        print("path hello")
-
         # File out of scope
         if (file_path.find(base_dir) != 0):
-            return "Forbidden"
+            return {'status': "Forbidden"}
 
         # Given Filepath does not exist
         if (not os.path.exists(file_path)):
-            return "Not Found"
+            return {'status': "Not Found"}
 
         # path to existent file
         if (os.path.exists(file_path) and os.path.isfile(file_path) and filename[-1] != "/"):
-            return file_path
+            return {'status': "OK", 'location': file_path}
 
         # path to directory, must end in "/"
         # add index.html endint -> recurse  
         if (os.path.exists(file_path) and os.path.isdir(file_path) and filename[-1] == "/"):
             return self.check_file_location(filename + "/index.html")
 
-        return "Not Found"
+        # path to directory, does not end in "/"
+        # redirect to "/"
+        if (os.path.exists(file_path) and os.path.isdir(file_path) and filename[-1] != "/"):
+            return {'status': "Redirected", 'location': filename + "/"}
 
-    def response_200(self, response_body, extra_headers=None):
-        status_code = 200
-        response_status = self.response_status(status_code=status_code)
-        
-        return self.compose_response(response_status=response_status, extra_headers=extra_headers, response_body=response_body)
-
-    def response_403(self, extra_headers=None):
-        status_code = 403
-        response_status = self.response_status(status_code=status_code)
-        response_body = str.encode('<h1>%i %s</h1>' % (status_code, http.client.responses[status_code]))
-        
-        return self.compose_response(response_status=response_status, extra_headers=extra_headers, response_body=response_body)
-
-    def response_404(self, extra_headers=None):
-        status_code = 404
-        response_status = self.response_status(status_code=status_code)
-        response_body = str.encode('<h1>%i %s</h1>' % (status_code, http.client.responses[status_code]))
-        
-        return self.compose_response(response_status=response_status, extra_headers=extra_headers, response_body=response_body)
-
-    def response_405(self, extra_headers=None):
-        status_code = 405
-        response_status = self.response_status(status_code=status_code)
-        response_body = str.encode('<h1>%i %s</h1>' % (status_code, http.client.responses[status_code]))
-
-        return self.compose_response(response_status=response_status, extra_headers=extra_headers, response_body=response_body)
-
-    def compose_response(self, response_status, extra_headers, response_body):
-        response_headers = self.response_headers(extra_headers=extra_headers)
-        return b"".join([response_status, response_headers, BLANK_LINE, response_body])
+        return {'status': "Not Found"}
 
 class HTTPRequest:
+    # Decodes HTTP request for method and uri
+
     def __init__(self, HTTPRequest):
         self.method = None
         self.uri = None
@@ -179,6 +142,77 @@ class HTTPRequest:
 
         self.method = params[0]
         self.uri = params[1]
+
+class HTTPResponse:
+    # Class that does mosh of the formatting for proper HTTP response
+    # Provides functions to send specific reposponses
+
+    headers = {
+        'Server': SERVER_NAME,
+        'Content-Type': 'text/html',
+    }
+
+    def datetime_now(self):
+        now = datetime.now()
+        stamp = mktime(now.timetuple())
+        return format_date_time(stamp)
+        
+    def response_status(self, status_code):
+        reason = http.client.responses[status_code]
+        line = "HTTP/1.1 %s %s\r\n" % (status_code, reason)
+
+        return line.encode()
+
+    def response_headers(self, extra_headers=None):
+        # Picks static headers and appends date, optional user headers and closes connection
+        headers = {"Date" : self.datetime_now()}
+        headers.update(self.headers)
+        headers["Connection"] = "close"
+
+        if extra_headers:
+            headers.update(extra_headers)
+
+        headers_str = ""
+
+        for header_type in headers:
+            headers_str += "%s: %s\r\n" % (header_type, headers[header_type])
+
+        return headers_str.encode()
+
+    def response_200(self, response_body=None, extra_headers=None):
+        status_code = 200
+        return self.compose_response(status_code=status_code, extra_headers=extra_headers, response_body=response_body)
+
+    def response_301(self, response_body=None, extra_headers=None):
+        status_code = 301
+        return self.compose_response(status_code=status_code, extra_headers=extra_headers, response_body=response_body)
+
+    def response_403(self, response_body=None, extra_headers=None):
+        status_code = 403   
+        return self.compose_response(status_code=status_code, extra_headers=extra_headers, response_body=response_body)
+
+    def response_404(self, response_body=None, extra_headers=None):
+        status_code = 404      
+        return self.compose_response(status_code=status_code, extra_headers=extra_headers, response_body=response_body)
+
+    def response_405(self, response_body=None, extra_headers=None):
+        status_code = 405
+        return self.compose_response(status_code=status_code, extra_headers=extra_headers, response_body=response_body)
+    
+    def response_500(self, response_body=None, extra_headers=None):
+        status_code = 500
+        return self.compose_response(status_code=status_code, extra_headers=extra_headers, response_body=response_body)
+
+    def response_body_by_code(self, status_code):
+        return str.encode('<h1>%i %s</h1>' % (status_code, http.client.responses[status_code]))
+
+    def compose_response(self, status_code, extra_headers, response_body):
+        response_status = self.response_status(status_code=status_code)
+        response_headers = self.response_headers(extra_headers=extra_headers)
+        if not response_body:
+            response_body = self.response_body_by_code(status_code)
+
+        return b"".join([response_status, response_headers, CARRIAGE_RETURN, response_body])
 
 if __name__ == "__main__":
     HOST, PORT = "localhost", 8080
