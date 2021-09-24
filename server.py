@@ -31,34 +31,43 @@ import os
 import socketserver
 import http.client
 import mimetypes
-from urllib.parse import urlparse, unquote
-
-from wsgiref.handlers import format_date_time
-from datetime import datetime
-from time import mktime
+from urllib.parse import unquote
+from time import gmtime, strftime
 
 CARRIAGE_RETURN = b"\r\n"
 BASE_DIR = "www/"
 SERVER_NAME = "MyLittleServer"
+BUFFER_SIZE = 1024
 
 class MyWebServer(socketserver.BaseRequestHandler):
     def handle(self):
-        # TODO read large requests
-        self.data = self.request.recv(1024).strip()
-        # print ("Got a request of: %s\n" % self.data)
+        self.data = self.receive_request()
 
         request = HTTPRequest(self.data)
-        # print("request is %s" % (request))
 
         try:
             handler = getattr(self, 'handle_%s' % request.method)
         except AttributeError:
             handler = getattr(self, "handle_invalid_method")
 
-        print(handler)
         response = handler(request)
 
+        self.send_response(response)
+        return
+
+    def receive_request(self):
+        full_data = b''
+        while True:
+            data = self.request.recv(BUFFER_SIZE)
+            full_data += data
+            if len(data) < BUFFER_SIZE:
+                break
+
+        return full_data
+
+    def send_response(self, response):
         self.request.sendall(response)
+        return None
 
     def handle_GET(self, request):
         filename = unquote(request.uri)
@@ -94,10 +103,14 @@ class MyWebServer(socketserver.BaseRequestHandler):
             return my_response.response_500()
 
     def handle_invalid_method(self, request=None):
+        # handle not implemented methods
+        
         my_response = HTTPResponse()
         return my_response.response_405()
 
     def check_file_location(self, filename):
+        #returns a tuple indicating the file existance and possible path
+
         base_dir = os.path.abspath("www/")
         file_path = os.path.abspath("www/" + filename)
 
@@ -153,9 +166,7 @@ class HTTPResponse:
     }
 
     def datetime_now(self):
-        now = datetime.now()
-        stamp = mktime(now.timetuple())
-        return format_date_time(stamp)
+        return strftime("%a, %d %b %Y %H:%M:%S GMT", gmtime())
         
     def response_status(self, status_code):
         reason = http.client.responses[status_code]
